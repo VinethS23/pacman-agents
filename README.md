@@ -35,10 +35,16 @@ action = argmax_a value(s, a)   # with ε-greedy random override
 
 ## Results
 
-Training on `smallGrid` with default hyperparameters (2000 training episodes, 10 test episodes):
+Tested on `smallGrid` with default hyperparameters — 2000 training episodes, 100 test episodes:
 
-- The agent converges to a reliable win rate on `smallGrid` within ~1000 episodes
-- Post-training (ε=0, α=0) the agent acts greedily on its learned Q-table
+| Metric | Value |
+|---|---|
+| Win rate | **89/100 (89%)** |
+| Average score | **391.73** |
+| Winning score range | 499 – 505 |
+| Losing score range | −513 – −508 |
+
+Post-training (ε=0, α=0) the agent acts greedily on its learned Q-table with no further updates.
 
 ## Hyperparameters
 
@@ -57,8 +63,8 @@ After training completes, both `alpha` and `epsilon` are set to 0 so the agent e
 Python 3.x, no external dependencies.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/pacman-qlearning.git
-cd pacman-qlearning
+git clone https://github.com/VinethS23/pacman-agents.git
+cd pacman-agents
 ```
 
 ## Running
