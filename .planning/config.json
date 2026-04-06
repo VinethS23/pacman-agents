@@ -1,0 +1,7 @@
+{
+  "model_profile": "balanced",
+  "parallelization": true,
+  "commit_docs": true,
+  "require_passing_tests": false,
+  "default_timeout_minutes": 10
+}
