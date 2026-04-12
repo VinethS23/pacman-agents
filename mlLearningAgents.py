@@ -389,24 +389,25 @@ class QNetwork:
         class _QNetworkImpl(nn.Module):
             def __init__(self, input_size, hidden_size, output_size):
                 super().__init__()
+                # Two hidden layers: more capacity to learn complex state→action mappings
                 self.fc1 = nn.Linear(input_size, hidden_size)
+                self.fc2 = nn.Linear(hidden_size, hidden_size)
+                self.fc3 = nn.Linear(hidden_size, output_size)
                 self.relu = nn.ReLU()
-                self.fc2 = nn.Linear(hidden_size, output_size)
 
             def forward(self, x):
-                hidden = self.fc1(x)
-                activated = self.relu(hidden)
-                output = self.fc2(activated)
-                return output
+                x = self.relu(self.fc1(x))
+                x = self.relu(self.fc2(x))
+                return self.fc3(x)
 
         return _QNetworkImpl(input_size, hidden_size, output_size)
 
 class NNQAgent(Agent):
 
     def __init__(self,
-                 alpha: float = 0.2,
-                 epsilon: float = 0.05,
-                 gamma: float = 0.8,
+                 alpha: float = 0.001,
+                 epsilon: float = 0.3,
+                 gamma: float = 0.9,
                  maxAttempts: int = 30,
                  numTraining: int = 10):
         """
@@ -436,8 +437,18 @@ class NNQAgent(Agent):
         self.action_counts = {}  # Counts each state-action pair -> from Qlearning agent
 
         self.actions = [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST, Directions.STOP]
-        self.network = QNetwork(10, 64, 5)
+        self.network = QNetwork(17, 64, 5)
         self.optimizer = optim.Adam(self.network.parameters(), lr=self.alpha)
+
+        # Target network: frozen copy of the main network, used to compute targets.
+        # Decouples the "moving target" from the network being trained.
+        self.target_network = QNetwork(17, 64, 5)
+        self.target_network.load_state_dict(self.network.state_dict())
+        self.target_update_freq = 50  # update target network every 50 episodes
+
+        # Epsilon decay: linearly decay from initial epsilon to epsilon_min over training
+        self.epsilon_start = self.epsilon
+        self.epsilon_min = 0.05
 
         self.last_state = None
         self.last_action = None
@@ -491,46 +502,126 @@ class NNQAgent(Agent):
 
         return reward
 
+    def shaping_reward(self, prev_state: GameStateFeatures, curr_state: GameStateFeatures) -> float:
+        """
+        Reward shaping: continuous learning signal via distance-based rewards.
+        - Moving toward food: small positive reward
+        - Getting too close to ghost: strong negative reward (danger zone)
+        This gives the network a dense learning signal even when the agent
+        never wins a full game.
+        """
+        from pacman_utils.util import manhattanDistance
+
+        def nearest_food_dist(s):
+            food_list = []
+            for x in range(s.food.width):
+                for y in range(s.food.height):
+                    if s.food[x][y]:
+                        food_list.append((x, y))
+            if not food_list:
+                return 0
+            return min(manhattanDistance(s.pacman_position, f) for f in food_list)
+
+        def nearest_ghost_dist(s):
+            if not s.ghost_positions:
+                return 999
+            return min(manhattanDistance(s.pacman_position, g) for g in s.ghost_positions)
+
+        prev_food = nearest_food_dist(prev_state)
+        curr_food = nearest_food_dist(curr_state)
+        food_reward = (prev_food - curr_food) * 5.0
+
+        # Ghost avoidance: penalty scales with closeness.
+        # Within 2 steps of the ghost: strong penalty.
+        curr_ghost = nearest_ghost_dist(curr_state)
+        if curr_ghost <= 1:
+            ghost_penalty = -20.0
+        elif curr_ghost == 2:
+            ghost_penalty = -5.0
+        else:
+            ghost_penalty = 0.0
+
+        return food_reward + ghost_penalty
+
     # Methods for the Neural Network
     def get_features(self, state: GameStateFeatures):
         import torch
+        from pacman_utils.util import manhattanDistance
 
-        pacman_position = state.pacman_position
+        pac_x, pac_y = state.pacman_position
         ghosts = state.ghost_states
         food = state.food
+        walls = state.walls
         capsules = state.capsules
-        features = [state.pacman_position[0], state.pacman_position[1]]
 
+        features = []
+
+        # 1. Pacman position normalized to [0,1] by grid size
+        width = walls.width
+        height = walls.height
+        features.append(pac_x / width)
+        features.append(pac_y / height)
+
+        # 2. Ghost features: relative position (normalized) + scared flag
         for i in range(2):
             if i < len(ghosts):
-                ghost_pos = ghosts[i].getPosition()
-                dx = ghost_pos[0] - pacman_position[0]
-                dy = ghost_pos[1] - pacman_position[1]
-                scared = ghosts[i].scaredTimer
+                gx, gy = ghosts[i].getPosition()
+                features.append((gx - pac_x) / width)
+                features.append((gy - pac_y) / height)
+                features.append(1.0 if ghosts[i].scaredTimer > 0 else 0.0)
             else:
-                dx, dy, scared = 0, 0, 0
-            features.extend([dx, dy, scared])
+                features.extend([0.0, 0.0, 0.0])
 
-        features.append(food.count())
-        features.append(len(capsules))
+        # 3. Nearest food: direction and distance (KEY missing feature)
+        food_positions = []
+        for x in range(food.width):
+            for y in range(food.height):
+                if food[x][y]:
+                    food_positions.append((x, y))
+
+        if food_positions:
+            nearest = min(food_positions, key=lambda f: manhattanDistance((pac_x, pac_y), f))
+            features.append((nearest[0] - pac_x) / width)   # dx to nearest food
+            features.append((nearest[1] - pac_y) / height)   # dy to nearest food
+            features.append(manhattanDistance((pac_x, pac_y), nearest) / (width + height))
+        else:
+            features.extend([0.0, 0.0, 0.0])
+
+        # 4. Wall indicators: can Pacman move in each direction? (1=open, 0=wall)
+        features.append(0.0 if walls[pac_x][pac_y + 1] else 1.0)  # North
+        features.append(0.0 if walls[pac_x][pac_y - 1] else 1.0)  # South
+        features.append(0.0 if walls[pac_x + 1][pac_y] else 1.0)  # East
+        features.append(0.0 if walls[pac_x - 1][pac_y] else 1.0)  # West
+
+        # 5. Food and capsule counts (normalized)
+        features.append(food.count() / max(food.width * food.height, 1))
+        features.append(len(capsules) / 4.0)
 
         return torch.tensor(features, dtype=torch.float32)
 
-    def learn(self, state, action, reward, next_state):
+    def learn(self, state, action, reward, next_state, is_terminal=False):
         import torch
+        import torch.nn as nn
 
+        # Scale reward to keep gradients stable
+        reward = reward / 500.0
         action_index = self.actions.index(action)
 
         predicted_q = self.network(state)[action_index]
 
         with torch.no_grad():
-            max_next_q = self.network(next_state).max()
+            if is_terminal:
+                target = torch.tensor(reward)
+            else:
+                # Use target network (frozen copy) to compute next-state Q-values
+                max_next_q = self.target_network(next_state).max()
+                target = reward + self.gamma * max_next_q
 
-        target = reward + self.gamma * max_next_q
-
-        loss = (predicted_q - target) ** 2
+        # Huber loss: robust to outliers (the -500 death penalty)
+        loss = nn.functional.smooth_l1_loss(predicted_q, target)
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
         self.optimizer.step()
 
     def getAction(self, state: GameState) -> Directions:
@@ -557,8 +648,12 @@ class NNQAgent(Agent):
         # Perform learning update if we have a stored previous state and action
         if self.last_state is not None and self.last_action is not None:
             reward = self.computeReward(self.last_state.state, state)
+            # Reward shaping: give a bonus for moving closer to nearest food.
+            # Without this, a random agent NEVER wins on smallGrid (0/100),
+            # so the network has no positive signal to learn from.
+            reward += self.shaping_reward(self.last_state, state_features_obj)
             last_state_tensor = self.get_features(self.last_state)
-            self.learn(last_state_tensor, self.last_action, reward, state_features_tensor)
+            self.learn(last_state_tensor, self.last_action, reward, state_features_tensor, is_terminal=False)
 
         self.last_state = state_features_obj
 
@@ -596,17 +691,13 @@ class NNQAgent(Agent):
         """
         print(f"Game {self.getEpisodesSoFar()} just ended!")
 
-        # Perform a final learning update with terminal state
+        # Perform a final learning update — terminal state, so is_terminal=True
+        # This means target = reward only (no future Q-value, since the game is over)
         if self.last_state is not None and self.last_action is not None:
             reward = self.computeReward(self.last_state.state, state)
-            # Terminal state has no future Q-value, so we use reward as target
             last_state_tensor = self.get_features(self.last_state)
-            action_index = self.actions.index(self.last_action)
-            predicted_q = self.network(last_state_tensor)[action_index]
-            loss = (predicted_q - reward) ** 2
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            final_state_tensor = self.get_features(GameStateFeatures(state))
+            self.learn(last_state_tensor, self.last_action, reward, final_state_tensor, is_terminal=True)
 
         # Reset the last state and action for the next episode
         self.last_state = None
@@ -616,7 +707,16 @@ class NNQAgent(Agent):
         # parameters to zero when we are done with the pre-set number
         # of training episodes
         self.incrementEpisodesSoFar()
-        if self.getEpisodesSoFar() == self.getNumTraining():
+
+        # Update target network periodically — copy current network weights to target
+        if self.getEpisodesSoFar() % self.target_update_freq == 0:
+            self.target_network.load_state_dict(self.network.state_dict())
+
+        if self.getEpisodesSoFar() < self.getNumTraining():
+            # Linear epsilon decay: go from epsilon_start → epsilon_min over training
+            progress = self.getEpisodesSoFar() / self.getNumTraining()
+            self.epsilon = self.epsilon_start - progress * (self.epsilon_start - self.epsilon_min)
+        elif self.getEpisodesSoFar() == self.getNumTraining():
             msg = 'Training Done (turning off epsilon and alpha)'
             print('%s\n%s' % (msg, '-' * len(msg)))
             self.setAlpha(0)
