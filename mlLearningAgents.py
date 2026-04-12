@@ -29,11 +29,7 @@ import random
 
 from pacman import Directions, GameState
 from pacman_utils.game import Agent
-from pacman_utils import util
-
-import torch                                                                                                                                                                                                                                                
-import torch.nn as nn                                                                                                                                                                                                                                       
-import torch.optim as optim     
+from pacman_utils import util     
 
 
 class GameStateFeatures:
@@ -385,19 +381,25 @@ class QLearnAgent(Agent):
             self.setAlpha(0)
             self.setEpsilon(0)
 
-class QNetwork(nn.Module):
-     
-    def __init__(self, input_size, hidden_size, output_size):
-        super().__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, output_size)
+class QNetwork:
+    def __new__(cls, input_size, hidden_size, output_size):
+        import torch
+        import torch.nn as nn
 
-    def forward(self, x):
-        hidden = self.fc1(x)
-        activated = self.relu(hidden)
-        output = self.fc2(activated)
-        return output
+        class _QNetworkImpl(nn.Module):
+            def __init__(self, input_size, hidden_size, output_size):
+                super().__init__()
+                self.fc1 = nn.Linear(input_size, hidden_size)
+                self.relu = nn.ReLU()
+                self.fc2 = nn.Linear(hidden_size, output_size)
+
+            def forward(self, x):
+                hidden = self.fc1(x)
+                activated = self.relu(hidden)
+                output = self.fc2(activated)
+                return output
+
+        return _QNetworkImpl(input_size, hidden_size, output_size)
 
 class NNQAgent(Agent):
 
@@ -421,6 +423,8 @@ class NNQAgent(Agent):
             maxAttempts: How many times to try each action in each state
             numTraining: number of training episodes
         """
+        import torch.optim as optim
+
         super().__init__()
         self.alpha = float(alpha)
         self.epsilon = float(epsilon)
@@ -428,11 +432,11 @@ class NNQAgent(Agent):
         self.maxAttempts = int(maxAttempts)
         self.numTraining = int(numTraining)
         self.episodesSoFar = 0
-        
+
         self.action_counts = {}  # Counts each state-action pair -> from Qlearning agent
 
         self.actions = [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST, Directions.STOP]
-        self.network = QNetwork(11, 64, 5)
+        self.network = QNetwork(10, 64, 5)
         self.optimizer = optim.Adam(self.network.parameters(), lr=self.alpha)
 
         self.last_state = None
@@ -487,8 +491,10 @@ class NNQAgent(Agent):
 
         return reward
 
-    # Methods for the Neural Network 
+    # Methods for the Neural Network
     def get_features(self, state: GameStateFeatures):
+        import torch
+
         pacman_position = state.pacman_position
         ghosts = state.ghost_states
         food = state.food
@@ -511,6 +517,8 @@ class NNQAgent(Agent):
         return torch.tensor(features, dtype=torch.float32)
 
     def learn(self, state, action, reward, next_state):
+        import torch
+
         action_index = self.actions.index(action)
 
         predicted_q = self.network(state)[action_index]
@@ -536,6 +544,8 @@ class NNQAgent(Agent):
         Returns:
             The action to take
         """
+        import torch
+
         legal = state.getLegalPacmanActions()
         if Directions.STOP in legal:
             legal.remove(Directions.STOP)
@@ -611,4 +621,5 @@ class NNQAgent(Agent):
             print('%s\n%s' % (msg, '-' * len(msg)))
             self.setAlpha(0)
             self.setEpsilon(0)
+
 
