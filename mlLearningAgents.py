@@ -31,6 +31,10 @@ from pacman import Directions, GameState
 from pacman_utils.game import Agent
 from pacman_utils import util
 
+import torch                                                                                                                                                                                                                                                
+import torch.nn as nn                                                                                                                                                                                                                                       
+import torch.optim as optim     
+
 
 class GameStateFeatures:
     """
@@ -49,6 +53,7 @@ class GameStateFeatures:
         self.state = state
         self.pacman_position = state.getPacmanPosition()
         self.ghost_positions = state.getGhostPositions()
+        self.ghost_states = state.getGhostStates()
         self.food = state.getFood()
         self.walls = state.getWalls()
         self.score = state.getScore()
@@ -88,6 +93,8 @@ class GameStateFeatures:
 
 
 class QLearnAgent(Agent):
+
+
 
     def __init__(self,
                  alpha: float = 0.2,
@@ -360,7 +367,7 @@ class QLearnAgent(Agent):
         
         # Perform a final learning update if we have a stored previous state and action
         if self.last_state is not None and self.last_action is not None:
-            final_state_features = GameStateFeatures(state)
+            final_state_features = GameStateFeatures(state) 
             reward = self.computeReward(self.last_state.state, state)
             self.learn(self.last_state, self.last_action, reward, final_state_features)
         
@@ -377,3 +384,171 @@ class QLearnAgent(Agent):
             print('%s\n%s' % (msg, '-' * len(msg)))
             self.setAlpha(0)
             self.setEpsilon(0)
+
+class QNetwork(nn.Module):
+     
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        hidden = self.fc1(x)
+        activated = self.relu(hidden)
+        output = self.fc2(activted)
+        return output
+
+class NNQAgent(Agent):
+
+    def __init__(self,
+                 alpha: float = 0.2,
+                 epsilon: float = 0.05,
+                 gamma: float = 0.8,
+                 maxAttempts: int = 30,
+                 numTraining: int = 10):
+        """
+        These values are either passed from the command line (using -a alpha=0.5,...)
+        or are set to the default values above.
+
+        The given hyperparameters are suggestions and are not necessarily optimal
+        so feel free to experiment with them.
+
+        Args:
+            alpha: learning rate
+            epsilon: exploration rate
+            gamma: discount factor
+            maxAttempts: How many times to try each action in each state
+            numTraining: number of training episodes
+        """
+        super().__init__()
+        self.alpha = float(alpha)
+        self.epsilon = float(epsilon)
+        self.gamma = float(gamma)
+        self.maxAttempts = int(maxAttempts)
+        self.numTraining = int(numTraining)
+        self.episodesSoFar = 0
+        
+        self.action_counts = {}  # Counts each state-action pair -> from Qlearning agent
+
+        self.network = QNetwork(11, 64, 5)
+        self.optimiser = optim.Adam(self.network.parameters(), lr=self.alpha) 
+        
+        self.last_state = None
+        self.last_action = None
+    
+
+    # Accessor functions for controlling learning
+    def incrementEpisodesSoFar(self):
+        self.episodesSoFar += 1
+
+    def getEpisodesSoFar(self):
+        return self.episodesSoFar
+
+    def getNumTraining(self):
+        return self.numTraining
+
+    # Accessor functions for parameters
+    def setEpsilon(self, value: float):
+        self.epsilon = value
+
+    def getAlpha(self) -> float:
+        return self.alpha
+
+    def setAlpha(self, value: float):
+        self.alpha = value
+
+    def getGamma(self) -> float:
+        return self.gamma
+
+    def getMaxAttempts(self) -> int:
+        return self.maxAttempts
+
+    def computeReward(startState: GameState,
+                      endState: GameState) -> float:
+        """
+        Args:
+            startState: A starting state
+            endState: A resulting state
+
+        Returns:
+            The reward assigned for the given trajectory
+        """
+        # Reward gained between start and end state
+        reward = endState.getScore() - startState.getScore()
+        
+        if endState.isWin():
+            reward += 500  # Reward for winning
+        elif endState.isLose():
+            reward -= 500  # Penalty for losing
+            
+        return reward
+
+    # Methods for the Neural Network 
+    def get_features(self, state: GameStateFeatures):
+        pacman_position = state.pacman_position
+        ghosts = state.ghost_states
+        food = state.food
+        capsules = state.capsules
+        features = [state.pacman_position[0], state.pacman_position[1]]
+
+        for i in range(2):
+            if i < len(ghosts):
+                ghost_pos = ghosts[i].getPosition()
+                dx = ghost_pos[0] - pacman_position[0]
+                dy = ghost_pos[1] - pacman_position[1]
+                scared = ghosts[i].scaredTimer
+            else:
+                dx, dy, scared = 0, 0, 0
+            features.extend([dx, dy, scared])
+
+        features.append(food.count())
+        features.append(len(capsules))
+
+        return torch.tensor(features, dtype=torch.float32)
+
+    def learn(self, state, action, reward, next_state):
+        self.actions.index(action)
+
+        predicted_q = self.network(state)[action_index]
+
+        with torch.no_grad():                                                                                                                                                                                                                                   
+          max_next_q = self.network(next_state).max() 
+
+        target = reward + gamma * max_next_q
+
+        loss = (predicted_q - target)**2
+        loss.backward()
+
+        optimiser.step()
+    
+    def final(self, state: GameState):
+        """
+        Handle the end of episodes.
+        This is called by the game after a win or a loss.
+
+        Args:
+            state: the final game state
+        """
+        print(f"Game {self.getEpisodesSoFar()} just ended!")
+        
+        # Perform a final learning update if we have a stored previous state and action -> TODO: IMPLEMENT FOR NN SCENARIO
+        if self.last_state is not None and self.last_action is not None:
+            # final_state_features = GameStateFeatures(state)
+            # reward = self.computeReward(self.last_state.state, state)
+            # self.learn(self.last_state, self.last_action, reward, final_state_features)
+        
+        # Reset the last state and action for the next episode
+        self.last_state = None
+        self.last_action = None
+
+        # Keep track of the number of games played, and set learning
+        # parameters to zero when we are done with the pre-set number
+        # of training episodes
+        self.incrementEpisodesSoFar()
+        if self.getEpisodesSoFar() == self.getNumTraining():
+            msg = 'Training Done (turning off epsilon and alpha)'
+            print('%s\n%s' % (msg, '-' * len(msg)))
+            self.setAlpha(0)
+            self.setEpsilon(0)
+
