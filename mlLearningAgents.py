@@ -396,7 +396,7 @@ class QNetwork(nn.Module):
     def forward(self, x):
         hidden = self.fc1(x)
         activated = self.relu(hidden)
-        output = self.fc2(activted)
+        output = self.fc2(activated)
         return output
 
 class NNQAgent(Agent):
@@ -431,11 +431,13 @@ class NNQAgent(Agent):
         
         self.action_counts = {}  # Counts each state-action pair -> from Qlearning agent
 
+        self.actions = [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST, Directions.STOP]
         self.network = QNetwork(11, 64, 5)
-        self.optimiser = optim.Adam(self.network.parameters(), lr=self.alpha) 
-        
+        self.optimizer = optim.Adam(self.network.parameters(), lr=self.alpha)
+
         self.last_state = None
         self.last_action = None
+        self.state = None
     
 
     # Accessor functions for controlling learning
@@ -464,6 +466,7 @@ class NNQAgent(Agent):
     def getMaxAttempts(self) -> int:
         return self.maxAttempts
 
+    @staticmethod
     def computeReward(startState: GameState,
                       endState: GameState) -> float:
         """
@@ -476,12 +479,12 @@ class NNQAgent(Agent):
         """
         # Reward gained between start and end state
         reward = endState.getScore() - startState.getScore()
-        
+
         if endState.isWin():
             reward += 500  # Reward for winning
         elif endState.isLose():
             reward -= 500  # Penalty for losing
-            
+
         return reward
 
     # Methods for the Neural Network 
@@ -508,20 +511,71 @@ class NNQAgent(Agent):
         return torch.tensor(features, dtype=torch.float32)
 
     def learn(self, state, action, reward, next_state):
-        self.actions.index(action)
+        action_index = self.actions.index(action)
 
         predicted_q = self.network(state)[action_index]
 
-        with torch.no_grad():                                                                                                                                                                                                                                   
-          max_next_q = self.network(next_state).max() 
+        with torch.no_grad():
+            max_next_q = self.network(next_state).max()
 
-        target = reward + gamma * max_next_q
+        target = reward + self.gamma * max_next_q
 
-        loss = (predicted_q - target)**2
+        loss = (predicted_q - target) ** 2
+        self.optimizer.zero_grad()
         loss.backward()
+        self.optimizer.step()
 
-        optimiser.step()
-    
+    def getAction(self, state: GameState) -> Directions:
+        """
+        Choose an action to take to maximise reward while
+        balancing gathering data for learning
+
+        Args:
+            state: the current state
+
+        Returns:
+            The action to take
+        """
+        legal = state.getLegalPacmanActions()
+        if Directions.STOP in legal:
+            legal.remove(Directions.STOP)
+
+        self.state = state
+        state_features_obj = GameStateFeatures(state)
+        state_features_tensor = self.get_features(state_features_obj)
+
+        # Perform learning update if we have a stored previous state and action
+        if self.last_state is not None and self.last_action is not None:
+            reward = self.computeReward(self.last_state.state, state)
+            last_state_tensor = self.get_features(self.last_state)
+            self.learn(last_state_tensor, self.last_action, reward, state_features_tensor)
+
+        self.last_state = state_features_obj
+
+        # Use Epsilon-greedy exploration strategy
+        if util.flipCoin(self.epsilon):
+            # Take a random action (explore) with probability epsilon
+            chosen_action = random.choice(legal)
+        else:
+            # Otherwise, take the action with the highest Q-value (exploitation)
+            with torch.no_grad():
+                q_values = self.network(state_features_tensor)
+            action_values = []
+            for i, action in enumerate(self.actions):
+                if action in legal:
+                    action_values.append((q_values[i].item(), action))
+
+            if action_values:
+                best_value = max(action_values)[0]
+                best_actions = [a for v, a in action_values if v == best_value]
+                chosen_action = random.choice(best_actions)
+            else:
+                chosen_action = random.choice(legal)
+
+        self.last_action = chosen_action
+
+        return chosen_action
+
     def final(self, state: GameState):
         """
         Handle the end of episodes.
@@ -531,13 +585,19 @@ class NNQAgent(Agent):
             state: the final game state
         """
         print(f"Game {self.getEpisodesSoFar()} just ended!")
-        
-        # Perform a final learning update if we have a stored previous state and action -> TODO: IMPLEMENT FOR NN SCENARIO
+
+        # Perform a final learning update with terminal state
         if self.last_state is not None and self.last_action is not None:
-            # final_state_features = GameStateFeatures(state)
-            # reward = self.computeReward(self.last_state.state, state)
-            # self.learn(self.last_state, self.last_action, reward, final_state_features)
-        
+            reward = self.computeReward(self.last_state.state, state)
+            # Terminal state has no future Q-value, so we use reward as target
+            last_state_tensor = self.get_features(self.last_state)
+            action_index = self.actions.index(self.last_action)
+            predicted_q = self.network(last_state_tensor)[action_index]
+            loss = (predicted_q - reward) ** 2
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
         # Reset the last state and action for the next episode
         self.last_state = None
         self.last_action = None
