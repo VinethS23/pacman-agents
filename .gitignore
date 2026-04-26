@@ -19,3 +19,6 @@ env/
 
 # Claude Code internal
 .claude/
+
+# Notes
+Neural-Networks-intro.txt
